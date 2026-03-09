@@ -1,0 +1,14 @@
+export { default as authRoutes } from './auth.js';
+export { default as profileRoutes } from './profiles.js';
+export { default as medicationRoutes } from './medications.js';
+export { default as symptomRoutes } from './symptoms.js';
+export { default as reminderRoutes } from './reminders.js';
+export { default as summaryRoutes } from './summaries.js';
+export { default as caregiverRoutes } from './caregivers.js';
+export { default as syncRoutes } from './sync.js';
+export { default as healthRoutes } from './health.js';
+export { default as healthMetricRoutes } from './healthMetrics.js';
+export { default as appointmentRoutes } from './appointments.js';
+export { default as messageRoutes } from './messages.js';
+export { default as pushRoutes } from './push.js';
+export { default as adminRoutes } from './admin.js';

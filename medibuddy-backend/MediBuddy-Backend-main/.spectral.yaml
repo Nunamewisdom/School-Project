@@ -1,0 +1,25 @@
+extends:
+  - "spectral:oas"
+
+rules:
+  # Require operation IDs
+  operation-operationId: error
+
+  # Require descriptions on operations
+  operation-description: warn
+
+  # Require examples in responses
+  oas3-valid-schema-example: warn
+
+  # Info must have contact
+  info-contact: warn
+
+  # Paths should use kebab-case
+  paths-kebab-case:
+    severity: warn
+    given: "$.paths"
+    then:
+      field: "@key"
+      function: pattern
+      functionOptions:
+        match: "^/[a-z0-9\\-/{}:]+$"

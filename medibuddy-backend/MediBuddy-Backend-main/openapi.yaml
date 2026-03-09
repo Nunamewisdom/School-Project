@@ -1,0 +1,1838 @@
+openapi: 3.0.3
+info:
+  title: MediBuddy API
+  description: |
+    REST API for MediBuddy — a medication management, symptom logging, and
+    consultation-summary PWA designed for low-resource settings.
+
+    ## Base URL
+    All endpoints are prefixed with `/api`.
+
+    ## Authentication
+    Most endpoints require a **Bearer JWT** in the `Authorization` header.
+    Obtain tokens via the OTP → verify flow (see Auth endpoints).
+
+    ## Response Envelope
+    Every response follows:
+    ```json
+    { "success": true, "data": { ... }, "message": "optional", "serverTime": "ISO-8601" }
+    ```
+    Errors:
+    ```json
+    { "success": false, "error": "msg", "code": "CODE", "details": [], "serverTime": "ISO-8601" }
+    ```
+
+    ## Idempotency
+    Mutating endpoints accept an `Idempotency-Key` header (UUID v4).
+    The server caches responses for 24 h; replaying the same key returns the cached result.
+
+    ## Rate Limits
+    | Preset | Window | Max |
+    |--------|--------|-----|
+    | General | 15 min | 100 |
+    | Auth | 15 min | 20 |
+    | OTP | 15 min | 5 |
+    | Sync | 1 min | 30 |
+    | Write | 1 min | 60 |
+
+    Rate headers: `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `Retry-After`.
+
+  version: 1.0.0
+  contact:
+    name: MediBuddy Team
+  license:
+    name: UNLICENSED
+
+servers:
+  - url: http://localhost:5000/api
+    description: Local development
+  - url: https://medibuddy-backend-w9hf.onrender.com/api
+    description: Production (Render)
+  - url: http://localhost:4010
+    description: Prism mock server
+
+tags:
+  - name: Auth
+    description: OTP login, JWT tokens, consent, account deletion
+  - name: Profiles
+    description: User profile CRUD
+  - name: Medications
+    description: Medication CRUD under a profile
+  - name: Reminders
+    description: Reminder listing & acknowledgement
+  - name: Symptoms
+    description: Symptom logging & listing
+  - name: Summaries
+    description: Consultation summary generation & PDF
+  - name: Caregivers
+    description: Caregiver management
+  - name: Appointments
+    description: Appointment CRUD
+  - name: HealthMetrics
+    description: Health metric tracking (BP, glucose, weight, etc.)
+  - name: Messages
+    description: In-app messaging
+  - name: Push
+    description: Web Push subscription management
+  - name: Sync
+    description: Offline sync batch & incremental changes
+  - name: Admin
+    description: Protected admin / metrics endpoints
+  - name: Health
+    description: Service health check
+
+# ──────────────────────────────────────────────────────────────
+# PATHS
+# ──────────────────────────────────────────────────────────────
+paths:
+
+  # ═══════ AUTH ═══════
+
+  /auth/otp:
+    post:
+      operationId: requestOtp
+      tags: [Auth]
+      summary: Request OTP for phone number
+      description: Sends a one-time password to the provided phone via SMS.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [phone]
+              properties:
+                phone:
+                  type: string
+                  example: "+2348012345678"
+            example:
+              phone: "+2348012345678"
+      responses:
+        "200":
+          description: OTP sent
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessEnvelope"
+              example:
+                success: true
+                data:
+                  requestId: "6613a1c8e4b0f12abc000001"
+                  expiresIn: 600
+                message: "OTP sent successfully"
+                serverTime: "2026-02-10T12:00:00.000Z"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /auth/verify:
+    post:
+      operationId: verifyOtp
+      tags: [Auth]
+      summary: Verify OTP and receive tokens
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [requestId, otp]
+              properties:
+                requestId:
+                  type: string
+                otp:
+                  type: string
+                  example: "123456"
+            example:
+              requestId: "6613a1c8e4b0f12abc000001"
+              otp: "123456"
+      responses:
+        "200":
+          description: Authentication successful
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessEnvelope"
+              example:
+                success: true
+                data:
+                  accessToken: "eyJhbGciOiJIUzI1NiIs..."
+                  refreshToken: "eyJhbGciOiJIUzI1NiIs..."
+                  user:
+                    id: "6613a1c8e4b0f12abc000002"
+                    phone: "+2348012345678"
+                    name: null
+                    timezone: "Africa/Lagos"
+                    consent: { accepted: false, version: null, acceptedAt: null }
+                message: "Authentication successful"
+                serverTime: "2026-02-10T12:00:05.000Z"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /auth/refresh:
+    post:
+      operationId: refreshToken
+      tags: [Auth]
+      summary: Refresh access token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refreshToken]
+              properties:
+                refreshToken:
+                  type: string
+            example:
+              refreshToken: "eyJhbGciOiJIUzI1NiIs..."
+      responses:
+        "200":
+          description: New token pair
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessEnvelope"
+              example:
+                success: true
+                data:
+                  accessToken: "eyJhbGciOiJIUzI1NiIs..."
+                  refreshToken: "eyJhbGciOiJIUzI1NiIs..."
+                message: "Token refreshed successfully"
+                serverTime: "2026-02-10T12:01:00.000Z"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /auth/logout:
+    post:
+      operationId: logout
+      tags: [Auth]
+      summary: Revoke refresh token
+      responses:
+        "200":
+          description: Logged out
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessEnvelope"
+              example:
+                success: true
+                data: null
+                message: "Logged out successfully"
+                serverTime: "2026-02-10T12:02:00.000Z"
+
+  /auth/consent:
+    patch:
+      operationId: updateConsent
+      tags: [Auth]
+      summary: Record user consent acceptance
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [accepted, version]
+              properties:
+                accepted:
+                  type: boolean
+                version:
+                  type: string
+                  example: "1.0"
+            example:
+              accepted: true
+              version: "1.0"
+      responses:
+        "200":
+          description: Consent updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessEnvelope"
+              example:
+                success: true
+                data:
+                  consent:
+                    accepted: true
+                    version: "1.0"
+                    acceptedAt: "2026-02-10T12:03:00.000Z"
+                message: "Consent updated successfully"
+                serverTime: "2026-02-10T12:03:00.000Z"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /auth/account:
+    delete:
+      operationId: deleteAccount
+      tags: [Auth]
+      summary: Soft-delete user account (30-day grace period)
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Account scheduled for deletion
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessEnvelope"
+              example:
+                success: true
+                data:
+                  deletedAt: "2026-02-10T12:04:00.000Z"
+                  gracePeriodDays: 30
+                message: "Account scheduled for deletion. You have 30 days to restore it."
+                serverTime: "2026-02-10T12:04:00.000Z"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  # ═══════ PROFILES ═══════
+
+  /profiles:
+    get:
+      operationId: listProfiles
+      tags: [Profiles]
+      summary: List profiles owned by the user
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Array of profiles
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessEnvelope"
+              example:
+                success: true
+                data:
+                  - _id: "aaa111"
+                    ownerId: "usr001"
+                    name: "John Doe"
+                    dob: "1990-05-15"
+                    relation: "self"
+                    conditions: ["hypertension"]
+                serverTime: "2026-02-10T12:05:00.000Z"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    post:
+      operationId: createProfile
+      tags: [Profiles]
+      summary: Create a new profile
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateProfile"
+      responses:
+        "201":
+          description: Profile created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessEnvelope"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /profiles/{profileId}:
+    parameters:
+      - $ref: "#/components/parameters/profileId"
+    get:
+      operationId: getProfile
+      tags: [Profiles]
+      summary: Get profile details
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Profile object
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessEnvelope"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    put:
+      operationId: updateProfile
+      tags: [Profiles]
+      summary: Update profile
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateProfile"
+      responses:
+        "200":
+          description: Profile updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessEnvelope"
+    delete:
+      operationId: deleteProfile
+      tags: [Profiles]
+      summary: Soft-delete profile
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Profile deleted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessEnvelope"
+
+  # ═══════ MEDICATIONS ═══════
+
+  /profiles/{profileId}/medications:
+    parameters:
+      - $ref: "#/components/parameters/profileId"
+    get:
+      operationId: listMedications
+      tags: [Medications]
+      summary: List medications for a profile
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Array of medications
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessEnvelope"
+    post:
+      operationId: createMedication
+      tags: [Medications]
+      summary: Create a medication
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateMedication"
+      responses:
+        "201":
+          description: Medication created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessEnvelope"
+
+  /profiles/{profileId}/medications/{medId}:
+    parameters:
+      - $ref: "#/components/parameters/profileId"
+      - name: medId
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      operationId: getMedication
+      tags: [Medications]
+      summary: Get a single medication
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Medication object
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessEnvelope"
+    put:
+      operationId: updateMedication
+      tags: [Medications]
+      summary: Update medication
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateMedication"
+      responses:
+        "200":
+          description: Medication updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessEnvelope"
+    delete:
+      operationId: deleteMedication
+      tags: [Medications]
+      summary: Delete medication (soft)
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Medication deleted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessEnvelope"
+
+  # ═══════ REMINDERS ═══════
+
+  /profiles/{profileId}/reminders:
+    parameters:
+      - $ref: "#/components/parameters/profileId"
+    get:
+      operationId: listReminders
+      tags: [Reminders]
+      summary: List reminders (24 h window)
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Array of reminder events
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessEnvelope"
+
+  /profiles/{profileId}/reminders/{reminderId}/ack:
+    parameters:
+      - $ref: "#/components/parameters/profileId"
+      - name: reminderId
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      operationId: ackReminder
+      tags: [Reminders]
+      summary: Acknowledge a reminder (taken / snooze / skip)
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action]
+              properties:
+                action:
+                  type: string
+                  enum: [taken, snooze, skip]
+                deviceId:
+                  type: string
+                clientTs:
+                  type: string
+                  format: date-time
+            example:
+              action: "taken"
+              deviceId: "browser-xyz"
+              clientTs: "2026-02-10T08:01:00.000Z"
+      responses:
+        "200":
+          description: Reminder acknowledged
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessEnvelope"
+
+  # ═══════ SYMPTOMS ═══════
+
+  /profiles/{profileId}/symptoms:
+    parameters:
+      - $ref: "#/components/parameters/profileId"
+    get:
+      operationId: listSymptoms
+      tags: [Symptoms]
+      summary: List symptom logs with optional date range
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: start
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: end
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+      responses:
+        "200":
+          description: Paginated symptoms
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessEnvelope"
+    post:
+      operationId: logSymptom
+      tags: [Symptoms]
+      summary: Log a symptom (supports idempotency)
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateSymptom"
+      responses:
+        "201":
+          description: Symptom logged
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessEnvelope"
+
+  # ═══════ SUMMARIES ═══════
+
+  /profiles/{profileId}/summaries:
+    parameters:
+      - $ref: "#/components/parameters/profileId"
+    get:
+      operationId: listSummaries
+      tags: [Summaries]
+      summary: List consultation summaries
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Array of summaries
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessEnvelope"
+    post:
+      operationId: generateSummary
+      tags: [Summaries]
+      summary: Generate a consultation summary PDF
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [startDate, endDate]
+              properties:
+                startDate:
+                  type: string
+                  format: date
+                endDate:
+                  type: string
+                  format: date
+            example:
+              startDate: "2026-01-01"
+              endDate: "2026-02-01"
+      responses:
+        "201":
+          description: Summary generation started / completed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessEnvelope"
+
+  /profiles/{profileId}/summaries/{summaryId}:
+    parameters:
+      - $ref: "#/components/parameters/profileId"
+      - name: summaryId
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      operationId: getSummary
+      tags: [Summaries]
+      summary: Get summary details and PDF URL
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Summary with signed PDF download URL
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessEnvelope"
+              example:
+                success: true
+                data:
+                  _id: "sum001"
+                  profileId: "aaa111"
+                  status: "completed"
+                  pdfUrl: "https://b2.example.com/signed-url..."
+                  startDate: "2026-01-01"
+                  endDate: "2026-02-01"
+                  medicationCount: 3
+                  symptomCount: 12
+                serverTime: "2026-02-10T12:10:00.000Z"
+
+  /profiles/{profileId}/summaries/{summaryId}/download:
+    parameters:
+      - $ref: "#/components/parameters/profileId"
+      - name: summaryId
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      operationId: downloadSummary
+      tags: [Summaries]
+      summary: Download summary as PDF (inline)
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: PDF binary
+          content:
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ═══════ CAREGIVERS ═══════
+
+  /profiles/{profileId}/caregivers:
+    parameters:
+      - $ref: "#/components/parameters/profileId"
+    get:
+      operationId: listCaregivers
+      tags: [Caregivers]
+      summary: List caregivers for a profile
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Array of caregivers
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessEnvelope"
+    post:
+      operationId: addCaregiver
+      tags: [Caregivers]
+      summary: Add a caregiver
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateCaregiver"
+      responses:
+        "201":
+          description: Caregiver added
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessEnvelope"
+
+  /profiles/{profileId}/caregivers/{caregiverId}:
+    parameters:
+      - $ref: "#/components/parameters/profileId"
+      - name: caregiverId
+        in: path
+        required: true
+        schema:
+          type: string
+    patch:
+      operationId: updateCaregiver
+      tags: [Caregivers]
+      summary: Update caregiver settings
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateCaregiver"
+      responses:
+        "200":
+          description: Caregiver updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessEnvelope"
+    delete:
+      operationId: removeCaregiver
+      tags: [Caregivers]
+      summary: Remove caregiver (soft-delete)
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Caregiver removed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessEnvelope"
+
+  # ═══════ APPOINTMENTS ═══════
+
+  /appointments/{profileId}:
+    parameters:
+      - $ref: "#/components/parameters/profileId"
+    get:
+      operationId: listAppointments
+      tags: [Appointments]
+      summary: List appointments for a profile
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Array of appointments
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessEnvelope"
+    post:
+      operationId: createAppointment
+      tags: [Appointments]
+      summary: Create an appointment
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateAppointment"
+      responses:
+        "201":
+          description: Appointment created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessEnvelope"
+
+  /appointments/{profileId}/upcoming:
+    parameters:
+      - $ref: "#/components/parameters/profileId"
+    get:
+      operationId: listUpcomingAppointments
+      tags: [Appointments]
+      summary: List upcoming appointments
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Upcoming appointments
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessEnvelope"
+
+  /appointments/{profileId}/{appointmentId}:
+    parameters:
+      - $ref: "#/components/parameters/profileId"
+      - name: appointmentId
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      operationId: getAppointment
+      tags: [Appointments]
+      summary: Get appointment details
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Appointment object
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessEnvelope"
+    put:
+      operationId: updateAppointment
+      tags: [Appointments]
+      summary: Update appointment
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateAppointment"
+      responses:
+        "200":
+          description: Appointment updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessEnvelope"
+    delete:
+      operationId: deleteAppointment
+      tags: [Appointments]
+      summary: Cancel/delete appointment
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Appointment deleted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessEnvelope"
+
+  /appointments/{profileId}/{appointmentId}/status:
+    parameters:
+      - $ref: "#/components/parameters/profileId"
+      - name: appointmentId
+        in: path
+        required: true
+        schema:
+          type: string
+    patch:
+      operationId: updateAppointmentStatus
+      tags: [Appointments]
+      summary: Update appointment status
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status:
+                  type: string
+                  enum: [scheduled, completed, cancelled, no-show]
+      responses:
+        "200":
+          description: Status updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessEnvelope"
+
+  # ═══════ HEALTH METRICS ═══════
+
+  /health-metrics/{profileId}:
+    parameters:
+      - $ref: "#/components/parameters/profileId"
+    get:
+      operationId: listHealthMetrics
+      tags: [HealthMetrics]
+      summary: List health metrics for a profile
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: type
+          in: query
+          schema:
+            type: string
+            enum: [blood_pressure, blood_sugar, weight, heart_rate, temperature, oxygen]
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+      responses:
+        "200":
+          description: Array of health metrics
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessEnvelope"
+    post:
+      operationId: recordHealthMetric
+      tags: [HealthMetrics]
+      summary: Record a health metric
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateHealthMetric"
+      responses:
+        "201":
+          description: Metric recorded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessEnvelope"
+
+  /health-metrics/{profileId}/latest:
+    parameters:
+      - $ref: "#/components/parameters/profileId"
+    get:
+      operationId: getLatestHealthMetrics
+      tags: [HealthMetrics]
+      summary: Get latest reading for each metric type
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Latest metrics by type
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessEnvelope"
+
+  /health-metrics/{profileId}/trends:
+    parameters:
+      - $ref: "#/components/parameters/profileId"
+    get:
+      operationId: getHealthMetricTrends
+      tags: [HealthMetrics]
+      summary: Get metric trends over time
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: type
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: days
+          in: query
+          schema:
+            type: integer
+            default: 30
+      responses:
+        "200":
+          description: Trend data
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessEnvelope"
+
+  /health-metrics/{profileId}/batch:
+    parameters:
+      - $ref: "#/components/parameters/profileId"
+    post:
+      operationId: batchRecordHealthMetrics
+      tags: [HealthMetrics]
+      summary: Record multiple health metrics at once
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [metrics]
+              properties:
+                metrics:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/CreateHealthMetric"
+      responses:
+        "201":
+          description: Metrics recorded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessEnvelope"
+
+  /health-metrics/{profileId}/{metricId}:
+    parameters:
+      - $ref: "#/components/parameters/profileId"
+      - name: metricId
+        in: path
+        required: true
+        schema:
+          type: string
+    put:
+      operationId: updateHealthMetric
+      tags: [HealthMetrics]
+      summary: Update a health metric
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateHealthMetric"
+      responses:
+        "200":
+          description: Metric updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessEnvelope"
+    delete:
+      operationId: deleteHealthMetric
+      tags: [HealthMetrics]
+      summary: Delete a health metric
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Metric deleted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessEnvelope"
+
+  # ═══════ MESSAGES ═══════
+
+  /messages:
+    post:
+      operationId: sendMessage
+      tags: [Messages]
+      summary: Send a message
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateMessage"
+      responses:
+        "201":
+          description: Message sent
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessEnvelope"
+
+  /messages/system:
+    post:
+      operationId: sendSystemMessage
+      tags: [Messages]
+      summary: Send a system message
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [profileId, content]
+              properties:
+                profileId:
+                  type: string
+                content:
+                  type: string
+                type:
+                  type: string
+                  default: "system"
+      responses:
+        "201":
+          description: System message created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessEnvelope"
+
+  /messages/conversations:
+    get:
+      operationId: listConversations
+      tags: [Messages]
+      summary: List conversations for the user
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Array of conversations
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessEnvelope"
+
+  /messages/unread:
+    get:
+      operationId: getUnreadCount
+      tags: [Messages]
+      summary: Get unread message count
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Unread count
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessEnvelope"
+              example:
+                success: true
+                data: { count: 3 }
+                serverTime: "2026-02-10T12:15:00.000Z"
+
+  /messages/conversation/{conversationId}:
+    parameters:
+      - name: conversationId
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      operationId: getConversation
+      tags: [Messages]
+      summary: Get messages in a conversation
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Array of messages
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessEnvelope"
+
+  /messages/conversation/{conversationId}/read:
+    parameters:
+      - name: conversationId
+        in: path
+        required: true
+        schema:
+          type: string
+    patch:
+      operationId: markConversationRead
+      tags: [Messages]
+      summary: Mark conversation as read
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Marked as read
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessEnvelope"
+
+  /messages/{messageId}:
+    parameters:
+      - name: messageId
+        in: path
+        required: true
+        schema:
+          type: string
+    delete:
+      operationId: deleteMessage
+      tags: [Messages]
+      summary: Delete a message
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Message deleted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessEnvelope"
+
+  # ═══════ PUSH ═══════
+
+  /push/public-key:
+    get:
+      operationId: getVapidPublicKey
+      tags: [Push]
+      summary: Get VAPID public key for push subscription
+      responses:
+        "200":
+          description: VAPID public key
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessEnvelope"
+              example:
+                success: true
+                data:
+                  publicKey: "BNHwCEs5xGKebkPo_Wj27..."
+                serverTime: "2026-02-10T12:20:00.000Z"
+
+  /push/subscribe:
+    post:
+      operationId: subscribePush
+      tags: [Push]
+      summary: Save push subscription for the user
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [subscription]
+              properties:
+                subscription:
+                  type: object
+                  required: [endpoint, keys]
+                  properties:
+                    endpoint:
+                      type: string
+                    keys:
+                      type: object
+                      properties:
+                        p256dh:
+                          type: string
+                        auth:
+                          type: string
+      responses:
+        "200":
+          description: Subscription saved
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessEnvelope"
+
+  /push/unsubscribe:
+    post:
+      operationId: unsubscribePush
+      tags: [Push]
+      summary: Remove push subscription
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Subscription removed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessEnvelope"
+
+  /push/test:
+    post:
+      operationId: testPush
+      tags: [Push]
+      summary: Send a test push notification to the user
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Test notification sent
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessEnvelope"
+        "400":
+          description: No subscription found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+
+  # ═══════ SYNC ═══════
+
+  /sync/batch:
+    post:
+      operationId: syncBatch
+      tags: [Sync]
+      summary: Submit queued client operations for sync
+      description: |
+        Each operation carries an `idempotencyKey` so re-submitting is safe.
+        Operation types: `symptom_log`, `reminder_ack`, `medication_create`.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [operations]
+              properties:
+                operations:
+                  type: array
+                  items:
+                    type: object
+                    required: [type, payload, idempotencyKey, clientId, clientTs]
+                    properties:
+                      type:
+                        type: string
+                        enum: [symptom_log, reminder_ack, medication_create]
+                      payload:
+                        type: object
+                      idempotencyKey:
+                        type: string
+                        format: uuid
+                      clientId:
+                        type: string
+                      clientTs:
+                        type: string
+                        format: date-time
+            example:
+              operations:
+                - type: symptom_log
+                  payload: { symptom: "headache", severity: 3, profileId: "aaa111" }
+                  idempotencyKey: "550e8400-e29b-41d4-a716-446655440000"
+                  clientId: "device-1"
+                  clientTs: "2026-02-10T08:00:00.000Z"
+      responses:
+        "200":
+          description: Results per operation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessEnvelope"
+
+  /sync/changes:
+    get:
+      operationId: getChanges
+      tags: [Sync]
+      summary: Get server-side changes since a timestamp
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: since
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date-time
+          example: "2026-02-09T00:00:00.000Z"
+      responses:
+        "200":
+          description: Changes grouped by resource type
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessEnvelope"
+              example:
+                success: true
+                data:
+                  medications: []
+                  symptoms: []
+                  reminders: []
+                  serverTime: "2026-02-10T12:30:00.000Z"
+                serverTime: "2026-02-10T12:30:00.000Z"
+
+  # ═══════ ADMIN ═══════
+
+  /admin/metrics:
+    get:
+      operationId: getAdminMetrics
+      tags: [Admin]
+      summary: System and domain metrics (admin)
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Metrics snapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessEnvelope"
+              example:
+                success: true
+                data:
+                  system:
+                    uptime: 3600.5
+                    nodeVersion: "v20.11.0"
+                    memoryMB: { rss: 85.3, heapUsed: 42.1, heapTotal: 64.0 }
+                    mongoStatus: "connected"
+                  domain:
+                    activeUsers: 42
+                    collections:
+                      users: 50
+                      profiles: 65
+                      medications: 120
+                serverTime: "2026-02-10T12:35:00.000Z"
+
+  # ═══════ HEALTH ═══════
+
+  /health:
+    get:
+      operationId: healthCheck
+      tags: [Health]
+      summary: Service health check
+      responses:
+        "200":
+          description: Service status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessEnvelope"
+              example:
+                success: true
+                data:
+                  status: "ok"
+                  mongo: "connected"
+                  uptime: 3600
+                  timestamp: "2026-02-10T12:40:00.000Z"
+                serverTime: "2026-02-10T12:40:00.000Z"
+
+# ──────────────────────────────────────────────────────────────
+# COMPONENTS
+# ──────────────────────────────────────────────────────────────
+components:
+
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        Obtain via `POST /auth/verify`. Short-lived access token (15 min).
+        Use `POST /auth/refresh` with the refresh token to get a new pair.
+
+  parameters:
+    profileId:
+      name: profileId
+      in: path
+      required: true
+      schema:
+        type: string
+      description: MongoDB ObjectId of the profile
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      schema:
+        type: string
+        format: uuid
+      description: UUID v4 — server caches responses for 24 h
+
+  responses:
+    ValidationError:
+      description: Validation failed
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            success: false
+            error: "Validation failed"
+            code: "VALIDATION_ERROR"
+            details:
+              - path: "phone"
+                message: "Invalid phone number format"
+            serverTime: "2026-02-10T12:00:00.000Z"
+    Unauthorized:
+      description: Authentication required or token expired
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            success: false
+            error: "No token provided"
+            code: "UNAUTHORIZED"
+            serverTime: "2026-02-10T12:00:00.000Z"
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            success: false
+            error: "Resource not found"
+            code: "NOT_FOUND"
+            serverTime: "2026-02-10T12:00:00.000Z"
+    RateLimited:
+      description: Too many requests
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+          description: Seconds until rate limit resets
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            success: false
+            error: "Too many requests"
+            code: "RATE_LIMITED"
+            serverTime: "2026-02-10T12:00:00.000Z"
+
+  schemas:
+    SuccessEnvelope:
+      type: object
+      required: [success, serverTime]
+      properties:
+        success:
+          type: boolean
+          example: true
+        data:
+          description: Response payload (varies per endpoint)
+        message:
+          type: string
+        serverTime:
+          type: string
+          format: date-time
+
+    ErrorEnvelope:
+      type: object
+      required: [success, error, code, serverTime]
+      properties:
+        success:
+          type: boolean
+          example: false
+        error:
+          type: string
+        code:
+          type: string
+        details:
+          type: array
+          items:
+            type: object
+            properties:
+              path:
+                type: string
+              message:
+                type: string
+        serverTime:
+          type: string
+          format: date-time
+
+    User:
+      type: object
+      properties:
+        id:
+          type: string
+        phone:
+          type: string
+        name:
+          type: string
+        timezone:
+          type: string
+          default: "Africa/Lagos"
+        consent:
+          type: object
+          properties:
+            accepted:
+              type: boolean
+            version:
+              type: string
+            acceptedAt:
+              type: string
+              format: date-time
+
+    CreateProfile:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          example: "Amina Ibrahim"
+        dob:
+          type: string
+          format: date
+        relation:
+          type: string
+          enum: [self, family, other]
+        conditions:
+          type: array
+          items:
+            type: string
+
+    UpdateProfile:
+      type: object
+      properties:
+        name:
+          type: string
+        dob:
+          type: string
+          format: date
+        conditions:
+          type: array
+          items:
+            type: string
+
+    CreateMedication:
+      type: object
+      required: [name, times]
+      properties:
+        name:
+          type: string
+          example: "Amlodipine"
+        dosage:
+          type: string
+          example: "5mg"
+        times:
+          type: array
+          items:
+            type: string
+          example: ["08:00", "20:00"]
+        timezone:
+          type: string
+        channels:
+          type: array
+          items:
+            type: string
+            enum: [push, sms]
+          default: [push]
+        startDate:
+          type: string
+          format: date
+        endDate:
+          type: string
+          format: date
+        clientId:
+          type: string
+        clientTs:
+          type: string
+          format: date-time
+
+    UpdateMedication:
+      type: object
+      properties:
+        name:
+          type: string
+        dosage:
+          type: string
+        times:
+          type: array
+          items:
+            type: string
+        channels:
+          type: array
+          items:
+            type: string
+            enum: [push, sms]
+        isActive:
+          type: boolean
+
+    CreateSymptom:
+      type: object
+      required: [symptom, severity, clientTs]
+      properties:
+        symptom:
+          type: string
+          example: "headache"
+        severity:
+          type: integer
+          minimum: 1
+          maximum: 5
+          example: 3
+        duration:
+          type: string
+          example: "2 hours"
+        notes:
+          type: string
+        voiceNoteUrl:
+          type: string
+        clientId:
+          type: string
+        clientTs:
+          type: string
+          format: date-time
+
+    CreateCaregiver:
+      type: object
+      required: [name, phone]
+      properties:
+        name:
+          type: string
+          example: "Dr. Adebayo"
+        phone:
+          type: string
+          example: "+2348098765432"
+        relation:
+          type: string
+          example: "doctor"
+        alertOnMissedDose:
+          type: boolean
+          default: true
+        alertThresholdMinutes:
+          type: integer
+          default: 30
+
+    UpdateCaregiver:
+      type: object
+      properties:
+        name:
+          type: string
+        phone:
+          type: string
+        alertOnMissedDose:
+          type: boolean
+        alertThresholdMinutes:
+          type: integer
+
+    CreateAppointment:
+      type: object
+      required: [doctor, dateTime]
+      properties:
+        doctor:
+          type: string
+          example: "Dr. Adebayo"
+        dateTime:
+          type: string
+          format: date-time
+        duration:
+          type: integer
+          description: Duration in minutes
+          default: 30
+        location:
+          type: string
+        type:
+          type: string
+          enum: [in-person, virtual]
+          default: "in-person"
+        notes:
+          type: string
+
+    CreateHealthMetric:
+      type: object
+      required: [type, value, unit]
+      properties:
+        type:
+          type: string
+          enum: [blood_pressure, blood_sugar, weight, heart_rate, temperature, oxygen]
+        value:
+          oneOf:
+            - type: number
+            - type: object
+              properties:
+                systolic:
+                  type: number
+                diastolic:
+                  type: number
+        unit:
+          type: string
+          example: "mg/dL"
+        recordedAt:
+          type: string
+          format: date-time
+        source:
+          type: string
+          default: "manual"
+
+    CreateMessage:
+      type: object
+      required: [profileId, content]
+      properties:
+        profileId:
+          type: string
+        content:
+          type: string
+        type:
+          type: string
+          default: "text"
